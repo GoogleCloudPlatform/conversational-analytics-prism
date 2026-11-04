@@ -1,0 +1,47 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Pydantic schemas for the Example entity."""
+
+import datetime
+
+from prism.common.schemas.assertion import Assertion
+from prism.common.schemas.assertion import AssertionRequest
+import pydantic
+
+
+class Example(pydantic.BaseModel):
+  """Schema for a persisted Example."""
+
+  test_suite_id: int
+  logical_id: str
+  question: str = pydantic.Field(..., description="The input question")
+  asserts: list[Assertion] = pydantic.Field(
+      default_factory=list, description="List of assert definitions"
+  )
+  id: int
+  created_at: datetime.datetime
+  modified_at: datetime.datetime | None = None
+  is_archived: bool = False
+
+  model_config = pydantic.ConfigDict(from_attributes=True)
+
+
+class TestCaseInput(pydantic.BaseModel):
+  """Schema for bulk import of test cases with assertions."""
+
+  __test__ = False
+
+  question: str
+  assertions: list[AssertionRequest] = pydantic.Field(default_factory=list)

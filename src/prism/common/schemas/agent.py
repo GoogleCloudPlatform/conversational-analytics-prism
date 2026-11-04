@@ -1,0 +1,116 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Pydantic schemas for the Agent entity."""
+
+import datetime
+from typing import Union
+
+import pydantic
+
+
+class BigQueryConfig(pydantic.BaseModel):
+  """Configuration for BigQuery datasource."""
+
+  tables: list[str]
+
+
+class LookerConfig(pydantic.BaseModel):
+  """Configuration for Looker datasource."""
+
+  instance_uri: str
+  explores: list[str]
+
+
+class LookerFilter(pydantic.BaseModel):
+  """Usage of a filter in a Looker query."""
+
+  field: str
+  value: str | None = None
+
+
+class LookerQuery(pydantic.BaseModel):
+  """Representation of a Looker query."""
+
+  model: str | None = None
+  explore: str | None = None
+  fields: list[str] | None = None
+  filters: list[LookerFilter] | None = None
+  sorts: list[str] | None = None
+  limit: str | None = None
+
+
+class LookerGoldenQuery(pydantic.BaseModel):
+  """A golden query example for Looker."""
+
+  natural_language_questions: list[str]
+  looker_query: LookerQuery
+
+
+def normalize_location(location: str | None) -> str:
+  """Normalizes GCP location for Gemini Data Analytics agents.
+
+  Defaults empty or None to 'global', and lowercases locations (e.g. 'US' ->
+  'us').
+
+  Args:
+    location: The GCP location string to normalize.
+
+  Returns:
+    The normalized location string (defaults to 'global').
+  """
+  if not location:
+    return "global"
+  stripped = location.strip()
+  if not stripped:
+    return "global"
+  return stripped.lower()
+
+
+class AgentConfig(pydantic.BaseModel):
+  """Configuration for an Agent."""
+
+  project_id: str | None = None
+  location: str | None = "global"
+  agent_resource_id: str | None = None
+  datasource: Union[BigQueryConfig, LookerConfig, None] = None
+  system_instruction: str | None = None
+  looker_client_id: str | None = None
+  looker_client_secret: str | None = None
+  golden_queries: list[LookerGoldenQuery] | None = None
+
+  @pydantic.field_validator("location", mode="before")
+  @classmethod
+  def _validate_location(cls, v: str | None) -> str:
+    return normalize_location(v)
+
+
+class AgentBase(pydantic.BaseModel):
+  """Base schema for Agent data."""
+
+  name: str = pydantic.Field(..., description="Display name of the agent")
+  config: AgentConfig | None = pydantic.Field(
+      default_factory=AgentConfig, description="Configuration details"
+  )
+
+
+class Agent(AgentBase):
+  """Schema for a persisted Agent."""
+
+  id: int
+  created_at: datetime.datetime
+  modified_at: datetime.datetime | None = None
+  is_archived: bool = False
+
+  model_config = pydantic.ConfigDict(from_attributes=True)

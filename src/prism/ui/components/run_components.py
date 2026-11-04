@@ -1,0 +1,482 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Presentational components for evaluation run details."""
+
+import difflib
+import json
+from typing import Any
+
+from dash import dcc
+from dash import html
+from dash_iconify import DashIconify
+import dash_mantine_components as dmc
+from prism.common.schemas.execution import RunStatus
+from prism.ui.ids import EvaluationIds
+
+
+def render_run_context(
+    raw_context: dict[str, Any] | None = None,
+    loading: bool = False,
+):
+  """Renders a raw JSON view of the agent context snapshot."""
+  if loading:
+    return dmc.Stack([
+        dmc.Skeleton(h=20, w="40%"),
+        dmc.Skeleton(h=200, w="100%"),
+    ])
+
+  if raw_context is None:
+    return dmc.Text("No context snapshot available.", c="dimmed", size="sm")
+
+  try:
+    formatted_json = json.dumps(raw_context, indent=2)
+  except (TypeError, ValueError):
+    formatted_json = str(raw_context)
+
+  return dmc.Paper(
+      [
+          dmc.Group(
+              [
+                  dmc.Text("Agent Context Snapshot", fw=600, size="sm"),
+                  dmc.Button(
+                      "Compare to Live Context",
+                      id=EvaluationIds.RUN_CONTEXT_DIFF_BTN,
+                      variant="subtle",
+                      size="compact-xs",
+                      leftSection=DashIconify(icon="lucide:git-diff", width=14),
+                      color="blue.6",
+                  ),
+              ],
+              justify="space-between",
+              mb="sm",
+          ),
+          dmc.ScrollArea(
+              html.Pre(
+                  formatted_json,
+                  style={
+                      "whiteSpace": "pre-wrap",
+                      "wordBreak": "break-all",
+                      "fontSize": "12px",
+                      "margin": 0,
+                  },
+              ),
+              offsetScrollbars=True,
+              type="auto",
+              h=400,
+          ),
+      ],
+      withBorder=True,
+      p="md",
+      radius="md",
+      bg="white",
+  )
+
+
+def render_diff_modal():
+  """Renders the modal container for the context diff."""
+  return dmc.Modal(
+      title=dmc.Group(
+          [
+              dmc.Group(
+                  [
+                      dmc.Text("Context Comparison", fw=700, size="lg"),
+                      # Placeholder. The callback that fills the modal replaces
+                      # the whole title group with the real verdict.
+                      dmc.Badge(
+                          "Comparing",
+                          id=EvaluationIds.RUN_CONTEXT_DIFF_BADGE,
+                          color="gray",
+                          variant="light",
+                          size="sm",
+                      ),
+                  ],
+                  id=EvaluationIds.RUN_CONTEXT_DIFF_TITLE,
+                  gap="md",
+              ),
+              dmc.Button(
+                  "Download diff",
+                  id=EvaluationIds.BTN_DOWNLOAD_DIFF,
+                  variant="subtle",
+                  size="compact-sm",
+                  leftSection=DashIconify(
+                      icon="material-symbols:download", width=16
+                  ),
+                  # There is no diff until the live context arrives, and the
+                  # download callback returns no_update without it: no file, no
+                  # toast, nothing. The callbacks that fill the modal enable it.
+                  disabled=True,
+              ),
+          ],
+          gap="md",
+      ),
+      id=EvaluationIds.RUN_CONTEXT_DIFF_MODAL,
+      children=html.Div(id=EvaluationIds.RUN_CONTEXT_DIFF_CONTENT),
+      size="90%",
+      padding="xl",
+      radius="lg",
+      overlayProps={
+          "backgroundOpacity": 0.55,
+          "blur": 3,
+      },
+      styles={
+          "header": {
+              "borderBottom": "1px solid var(--mantine-color-gray-2)",
+              "marginBottom": "var(--mantine-spacing-xl)",
+              "paddingBottom": "var(--mantine-spacing-md)",
+          }
+      },
+  )
+
+
+def render_modern_context_diff(
+    snapshot_context: dict[str, Any], live_context: dict[str, Any]
+) -> tuple[html.Table, bool]:
+  """Renders a unified diff view of two contexts.
+
+  Returns the table and whether the two differ. Not a line count: ndiff emits
+  a - and a + for one changed line, so any count taken off these rows is
+  doubled, and every caller only wants the yes or no.
+  """
+  s_json = json.dumps(snapshot_context, indent=2).splitlines()
+  l_json = json.dumps(live_context, indent=2).splitlines()
+
+  rows = []
+
+  def add_row(s_num, l_num, op, line, bg=None, color=None):
+    return html.Tr(
+        [
+            html.Td(
+                str(s_num) if s_num else "",
+                style={
+                    "width": "40px",
+                    "color": "var(--mantine-color-gray-5)",
+                    "textAlign": "right",
+                    "paddingRight": "10px",
+                    "userSelect": "none",
+                },
+            ),
+            html.Td(
+                str(l_num) if l_num else "",
+                style={
+                    "width": "40px",
+                    "color": "var(--mantine-color-gray-5)",
+                    "textAlign": "right",
+                    "paddingRight": "10px",
+                    "userSelect": "none",
+                },
+            ),
+            html.Td(
+                op,
+                style={
+                    "width": "20px",
+                    "textAlign": "center",
+                    "fontWeight": "bold",
+                    "color": color,
+                },
+            ),
+            html.Td(
+                line,
+                style={
+                    "fontFamily": "var(--font-mono)",
+                    "fontSize": "13px",
+                    "whiteSpace": "pre-wrap",
+                },
+            ),
+        ],
+        style={"backgroundColor": bg} if bg else {},
+    )
+
+  if s_json == l_json:
+    rows.append(
+        html.Tr(
+            html.Td(
+                "No configuration changes detected.",
+                colSpan=4,
+                style={
+                    "padding": "12px 16px",
+                    "color": "var(--mantine-color-dimmed)",
+                    "fontSize": "13px",
+                    "textAlign": "center",
+                },
+            )
+        )
+    )
+    has_changes = False
+  else:
+    has_changes = True
+    matcher = difflib.SequenceMatcher(None, s_json, l_json)
+    for group_idx, group in enumerate(matcher.get_grouped_opcodes(n=3)):
+      if group_idx > 0:
+        rows.append(
+            add_row(
+                None,
+                None,
+                "...",
+                "",
+                bg="var(--mantine-color-gray-0)",
+                color="var(--mantine-color-gray-5)",
+            )
+        )
+      for tag, i1, i2, j1, j2 in group:
+        if tag == "equal":
+          for offset in range(i2 - i1):
+            rows.append(
+                add_row(
+                    i1 + offset + 1, j1 + offset + 1, "", s_json[i1 + offset]
+                )
+            )
+        if tag in ("replace", "delete"):
+          for s_idx in range(i1, i2):
+            rows.append(
+                add_row(
+                    s_idx + 1,
+                    None,
+                    "-",
+                    s_json[s_idx],
+                    bg="#fff5f5",
+                    color="#e03131",
+                )
+            )
+        if tag in ("replace", "insert"):
+          for l_idx in range(j1, j2):
+            rows.append(
+                add_row(
+                    None,
+                    l_idx + 1,
+                    "+",
+                    l_json[l_idx],
+                    bg="#f0fff4",
+                    color="#2f855a",
+                )
+            )
+
+  return (
+      html.Table(
+          html.Tbody(rows),
+          style={
+              "width": "100%",
+              "borderCollapse": "collapse",
+              "border": "1px solid var(--mantine-color-gray-2)",
+              "borderRadius": "8px",
+              "overflow": "hidden",
+          },
+      ),
+      has_changes,
+  )
+
+
+def generate_text_diff(
+    snapshot_context: dict[str, Any], live_context: dict[str, Any]
+):
+  """Generates a raw text unified diff of two contexts."""
+  s_json = json.dumps(snapshot_context, indent=2).splitlines()
+  l_json = json.dumps(live_context, indent=2).splitlines()
+  return "\n".join(difflib.unified_diff(s_json, l_json, lineterm=""))
+
+
+def render_trial_card(
+    trial: Any,
+    show_details_link: bool = True,
+    suite_link: str | None = None,
+    chart_section: Any | None = None,
+) -> dmc.Paper:
+  """Renders a simplified trial results card matching the comparison view."""
+  actions = []
+
+  is_terminal = getattr(trial, "status", None) in (
+      RunStatus.COMPLETED,
+      RunStatus.FAILED,
+      RunStatus.CANCELLED,
+  )
+
+  if is_terminal:
+    actions.append(
+        dmc.Anchor(
+            "View Trace",
+            href=f"/evaluations/trials/{trial.id}/trace",
+            size="10px",
+            fw=700,
+            underline=True,
+            c="blue.6",
+        )
+    )
+
+  # Callers pass show_details_link=False on the Trial Detail page, where the
+  # link would point at the page you are already on.
+  if show_details_link and is_terminal:
+    actions.append(
+        dmc.Anchor(
+            "View Details",
+            href=f"/evaluations/trials/{trial.id}",
+            size="10px",
+            fw=700,
+            underline=True,
+            c="blue.6",
+        )
+    )
+
+  if suite_link:
+    actions.append(
+        dmc.Anchor(
+            "View Test Suite",
+            href=suite_link,
+            size="10px",
+            fw=700,
+            underline=True,
+            c="blue.6",
+        )
+    )
+
+  sections = []
+
+  sections.append(
+      dmc.Box(
+          p="lg",
+          children=dmc.Stack(
+              gap="xs",
+              children=[
+                  dmc.Group(
+                      gap=4,
+                      children=[
+                          dmc.Box(
+                              style={
+                                  "width": "6px",
+                                  "height": "6px",
+                                  "borderRadius": "50%",
+                                  "backgroundColor": (
+                                      "var(--mantine-color-blue-5)"
+                                  ),
+                              }
+                          ),
+                          dmc.Text(
+                              "TEST CASE",
+                              size="10px",
+                              fw=700,
+                              c="blue.7",
+                          ),
+                      ],
+                  ),
+                  dmc.Text(
+                      trial.question if trial.question else "(No Test Case)",
+                      fw=700,
+                      size="lg",
+                      style={"letterSpacing": "-0.01em"},
+                  ),
+              ],
+          ),
+      )
+  )
+
+  sections.append(
+      dmc.Box(
+          p="lg",
+          style={"borderTop": "1px solid var(--mantine-color-gray-1)"},
+          children=dmc.Stack(
+              gap="md",
+              children=[
+                  dmc.Group(
+                      gap="md",
+                      children=[
+                          dmc.Group(
+                              gap=4,
+                              children=[
+                                  dmc.Box(
+                                      style={
+                                          "width": "6px",
+                                          "height": "6px",
+                                          "borderRadius": "50%",
+                                          "backgroundColor": (
+                                              "var(--mantine-color-blue-5)"
+                                          ),
+                                      }
+                                  ),
+                                  dmc.Text(
+                                      "AGENT RESPONSE",
+                                      size="10px",
+                                      fw=700,
+                                      c="blue.7",
+                                  ),
+                              ],
+                          ),
+                          *actions,
+                      ],
+                  ),
+                  dmc.Paper(
+                      p="md",
+                      radius="md",
+                      bg="var(--mantine-color-gray-0)",
+                      withBorder=True,
+                      style={"borderColor": "var(--mantine-color-gray-2)"},
+                      children=dcc.Markdown(
+                          trial.output_text or "No agent response available.",
+                          style={
+                              "fontFamily": "var(--font-mono)",
+                              "lineHeight": "1.7",
+                              "fontSize": "14px",
+                              "wordBreak": "break-word",
+                          },
+                      ),
+                  ),
+              ],
+          ),
+      )
+  )
+
+  if chart_section:
+    sections.append(
+        dmc.Box(
+            p="lg",
+            style={"borderTop": "1px solid var(--mantine-color-gray-1)"},
+            children=dmc.Stack(
+                gap="md",
+                children=[
+                    dmc.Group(
+                        gap=4,
+                        children=[
+                            dmc.Box(
+                                style={
+                                    "width": "6px",
+                                    "height": "6px",
+                                    "borderRadius": "50%",
+                                    "backgroundColor": (
+                                        "var(--mantine-color-blue-5)"
+                                    ),
+                                }
+                            ),
+                            dmc.Text(
+                                "GENERATED CHARTS",
+                                size="10px",
+                                fw=700,
+                                c="blue.7",
+                            ),
+                        ],
+                    ),
+                    chart_section,
+                ],
+            ),
+        )
+    )
+
+  return dmc.Paper(
+      withBorder=True,
+      radius="md",
+      p=0,
+      mb="xl",
+      style={
+          "borderColor": "var(--mantine-color-gray-2)",
+          "overflow": "hidden",
+      },
+      children=sections,
+  )
