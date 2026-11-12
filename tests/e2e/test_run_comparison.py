@@ -41,7 +41,9 @@ from playwright.sync_api import Page
 from prism.common.schemas.assertion import AssertionType
 from prism.common.schemas.execution import RunStatus
 from prism.ui.ids import ComparisonIds
+from prism.ui.utils import format_timestamp
 import pytest
+from tests.e2e.conftest import select_option
 
 pytestmark = pytest.mark.e2e
 
