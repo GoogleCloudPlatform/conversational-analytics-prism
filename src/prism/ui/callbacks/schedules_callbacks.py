@@ -875,7 +875,16 @@ for _button in (
   dash.clientside_callback(
       """
       function(nClicks) {
-          return nClicks ? true : window.dash_clientside.no_update;
+          if (!nClicks) {
+              return window.dash_clientside.no_update;
+          }
+          // A request that dies without a response never redraws the header,
+          // so bring the button back after longer than an action takes.
+          const id = window.dash_clientside.callback_context.triggered_id;
+          setTimeout(
+              () => window.dash_clientside.set_props(id, {disabled: false}),
+              15000);
+          return true;
       }
       """,
       dash.Output({"type": _button, "index": dash.MATCH}, CP.DISABLED),

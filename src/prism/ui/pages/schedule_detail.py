@@ -49,6 +49,8 @@ def layout(schedule_id: str = ""):  # pylint: disable=unused-argument
       actions_id=Ids.ACTIONS,
       children=[
           dcc.Interval(id=Ids.POLL_INTERVAL, interval=5000, n_intervals=0),
+          # Bumped by the poll only while the header is still unrendered.
+          dcc.Store(id=Ids.HEADER_REPAINT),
           # Shared with the list page so the modal's save callback and the row
           # action callback signal this page the same way.
           dcc.Store(id=ScheduleIds.UPDATE_SIGNAL),

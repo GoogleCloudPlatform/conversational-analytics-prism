@@ -113,9 +113,12 @@ def _build_schedule_detail_body(pathname: str | None) -> tuple[Any, ...]:
     inputs=[
         ("url", CP.PATHNAME),
         (ScheduleIds.UPDATE_SIGNAL, CP.DATA),
+        (Ids.HEADER_REPAINT, CP.DATA),
     ],
 )
-def render_schedule_detail_header(pathname: str | None, unused_signal: Any):
+def render_schedule_detail_header(
+    pathname: str | None, unused_signal: Any, unused_repaint: Any
+):
   """Renders the title, breadcrumbs, and header actions.
 
   These redraw on load and after a user action, never on the poll. Redrawing
@@ -127,12 +130,34 @@ def render_schedule_detail_header(pathname: str | None, unused_signal: Any):
   Args:
     pathname: The page path, which carries the schedule id.
     unused_signal: The update signal written after a schedule action.
+    unused_repaint: Bumped by the poll while the header is still unrendered.
 
   Returns:
     New children for the title, breadcrumbs, and actions, or no_update.
   """
-  del unused_signal
+  del unused_signal, unused_repaint
   return _build_schedule_detail_header(pathname)
+
+
+# If the header's load request dies, nothing else redraws it, so the page sits
+# with no title or buttons. The poll asks for a repaint only while the actions
+# container still holds the skeleton's None. A rendered header always has
+# children (a not-found schedule gets []), so there is no button to replace
+# mid-click.
+dash.clientside_callback(
+    """
+    function(nIntervals, actions) {
+        if (actions === null || actions === undefined) {
+            return nIntervals;
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    dash.Output(Ids.HEADER_REPAINT, CP.DATA),
+    dash.Input(Ids.POLL_INTERVAL, "n_intervals"),
+    dash.State(Ids.ACTIONS, CP.CHILDREN),
+    prevent_initial_call=True,
+)
 
 
 @typed_callback(

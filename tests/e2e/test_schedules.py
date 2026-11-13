@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import time
 
 from playwright.sync_api import expect
@@ -406,3 +407,86 @@ def test_double_clicking_run_now_queues_one_run_and_says_so(
       .all()
   )
   assert len(runs) == 1
+
+
+def _seed_schedule_far_future(seed, db, name: str) -> EvalSchedule:
+  agent = seed.agent(name=f"{name} Agent")
+  suite = seed.suite(name=f"{name} Suite")
+  sched = EvalSchedule(
+      name=name,
+      agent_id=agent.id,
+      test_suite_id=suite.id,
+      cadence="CUSTOM",
+      cron_expression="0 0 1 1 *",
+      timezone="UTC",
+      is_enabled=True,
+  )
+  db.add(sched)
+  db.commit()
+  return sched
+
+
+# Rejects, inside the page, the first Dash request whose output names
+# `target`, the way a request that never got a response failed in the bugbash.
+_FAIL_FIRST_REQUEST_JS = """(target) => {
+  const realFetch = window.fetch;
+  window.__failedRequests = 0;
+  window.fetch = function (url, options) {
+    if (String(url).includes("_dash-update-component") &&
+        window.__failedRequests === 0) {
+      const body = JSON.parse((options && options.body) || "{}");
+      if ((body.output || "").includes(target)) {
+        window.__failedRequests += 1;
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+    }
+    return realFetch.apply(this, arguments);
+  };
+}"""
+
+
+# The failed request makes Dash log 'Callback failed: the server did not
+# respond.' on purpose.
+@pytest.mark.allow_errors
+def test_header_comes_back_when_its_first_load_request_dies(
+    page: Page, base_url: str, seed, db
+):
+  """Without a repaint, a dead header request left no title or buttons."""
+  sched = _seed_schedule_far_future(seed, db, "Header Repaint Schedule")
+  page.add_init_script(
+      f"({_FAIL_FIRST_REQUEST_JS})"
+      f"({json.dumps(ScheduleDetailIds.ACTIONS + '.children')})"
+  )
+  page.goto(f"{base_url}/schedules/view/{sched.id}")
+  actions = page.locator(f"#{ScheduleDetailIds.ACTIONS}")
+  # The next poll tick, up to 5 s away, asks for the repaint.
+  expect(actions.get_by_role("button", name="Pause", exact=True)).to_be_visible(
+      timeout=15_000
+  )
+  assert page.evaluate("window.__failedRequests") == 1
+  expect(page.locator(f"#{ScheduleDetailIds.TITLE}")).to_have_text(
+      "Header Repaint Schedule"
+  )
+
+
+# The failed request makes Dash log 'Callback failed: the server did not
+# respond.' on purpose.
+@pytest.mark.allow_errors
+def test_button_comes_back_when_its_action_request_dies(
+    page: Page, base_url: str, seed, db
+):
+  """A click's request that dies must not leave the button disabled for good."""
+  sched = _seed_schedule_far_future(seed, db, "Dead Request Schedule")
+  actions = _open_detail(page, base_url, sched.id)
+  page.evaluate(_FAIL_FIRST_REQUEST_JS, f"{ScheduleIds.UPDATE_SIGNAL}.data")
+  pause = actions.get_by_role("button", name="Pause", exact=True)
+  pause.click()
+
+  expect(pause).to_be_disabled(timeout=5_000)
+  assert page.evaluate("window.__failedRequests") == 1
+  # The browser re-enables it 15 s after the click.
+  expect(pause).to_be_enabled(timeout=25_000)
+  # The request never reached the server, so the schedule is still active.
+  expect(
+      page.locator(f"#{ScheduleDetailIds.STATUS_CONTAINER}")
+  ).to_contain_text("Active")

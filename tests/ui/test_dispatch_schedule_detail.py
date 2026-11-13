@@ -366,3 +366,25 @@ def test_schedule_actions_disable_themselves_when_clicked(dash_client):
     ]
     assert len(matches) == 1, button
     assert matches[0].get("clientside_function"), button
+
+
+def test_poll_repaints_the_header_only_while_it_is_unrendered(dash_client):
+  """A header whose load request died must come back on the next poll.
+
+  The poll can't draw the header itself (see the test above), so a clientside
+  callback bumps a store the header callback listens to, and only while the
+  actions container still holds the skeleton's None.
+  """
+  deps = dash_http.dependencies(dash_client)
+  repaint = f"{ScheduleDetailIds.HEADER_REPAINT}.data"
+  bumpers = [dep for dep in deps if dep["output"] == repaint]
+  assert len(bumpers) == 1
+  assert bumpers[0].get("clientside_function")
+  assert [dash_http.address(i) for i in bumpers[0]["inputs"]] == [
+      f"{ScheduleDetailIds.POLL_INTERVAL}.n_intervals"
+  ]
+  assert [dash_http.address(s) for s in bumpers[0]["state"]] == [
+      f"{ScheduleDetailIds.ACTIONS}.children"
+  ]
+  header_inputs = {dash_http.address(i) for i in _header_dep(deps)["inputs"]}
+  assert repaint in header_inputs

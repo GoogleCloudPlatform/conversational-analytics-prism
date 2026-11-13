@@ -379,3 +379,4 @@ class ScheduleDetailIds:
   UPCOMING_CONTAINER = "schedule-detail-upcoming"
   RUNS_CONTAINER = "schedule-detail-runs"
   POLL_INTERVAL = "schedule-detail-poll-interval"
+  HEADER_REPAINT = "schedule-detail-header-repaint"
