@@ -19,6 +19,7 @@ from typing import Any
 
 import dash
 from prism.client import get_client
+from prism.common.schemas.schedule import ScheduleSchema
 from prism.ui.components import schedule_components
 from prism.ui.constants import CP
 from prism.ui.ids import ScheduleDetailIds as Ids
@@ -28,32 +29,58 @@ from prism.ui.utils import typed_callback
 _DETAIL_PATH = re.compile(r"^/schedules/view/(?P<schedule_id>[^/]+)/?$")
 _RECENT_RUN_LIMIT = 10
 _UPCOMING_RUN_COUNT = 5
-_OUTPUT_COUNT = 8
+_HEADER_OUTPUT_COUNT = 3
+_BODY_OUTPUT_COUNT = 5
 
 
-def _build_schedule_detail_view(pathname: str | None) -> tuple[Any, ...]:
-  """Builds every container on `/schedules/view/<schedule_id>`."""
+def _schedule_id_from_path(pathname: str | None) -> str | None:
+  """Returns the raw id from `/schedules/view/<schedule_id>`, or None."""
   match = _DETAIL_PATH.match(pathname or "")
-  if not match:
-    return (dash.no_update,) * _OUTPUT_COUNT
+  return match.group("schedule_id") if match else None
 
-  raw_id = match.group("schedule_id")
-  client = get_client()
-  schedule = (
-      client.schedules.get_schedule(int(raw_id)) if raw_id.isdigit() else None
-  )
+
+def _load_schedule(raw_id: str) -> ScheduleSchema | None:
+  """Returns the schedule for `raw_id`, or None if it isn't a known id."""
+  if not raw_id.isdigit():
+    return None
+  return get_client().schedules.get_schedule(int(raw_id))
+
+
+def _build_schedule_detail_header(pathname: str | None) -> tuple[Any, ...]:
+  """Builds the title, breadcrumbs, and header actions."""
+  raw_id = _schedule_id_from_path(pathname)
+  if raw_id is None:
+    return (dash.no_update,) * _HEADER_OUTPUT_COUNT
+  schedule = _load_schedule(raw_id)
   if schedule is None:
     return (
         "Schedule not found",
         schedule_components.render_schedule_detail_breadcrumbs("Not found"),
-        None,
         [],
+    )
+  return (
+      schedule.name,
+      schedule_components.render_schedule_detail_breadcrumbs(schedule.name),
+      schedule_components.render_schedule_detail_actions(schedule),
+  )
+
+
+def _build_schedule_detail_body(pathname: str | None) -> tuple[Any, ...]:
+  """Builds the status, stats, configuration, upcoming runs, and history."""
+  raw_id = _schedule_id_from_path(pathname)
+  if raw_id is None:
+    return (dash.no_update,) * _BODY_OUTPUT_COUNT
+  schedule = _load_schedule(raw_id)
+  if schedule is None:
+    return (
+        None,
         [],
         schedule_components.render_schedule_not_found(raw_id),
         None,
         None,
     )
 
+  client = get_client()
   upcoming = []
   if schedule.is_enabled and not schedule.is_archived:
     upcoming = client.schedules.preview_next_runs(
@@ -69,10 +96,7 @@ def _build_schedule_detail_view(pathname: str | None) -> tuple[Any, ...]:
       )
   )
   return (
-      schedule.name,
-      schedule_components.render_schedule_detail_breadcrumbs(schedule.name),
       schedule_components.render_schedule_detail_status(schedule),
-      schedule_components.render_schedule_detail_actions(schedule),
       schedule_components.render_schedule_detail_stats(schedule),
       schedule_components.render_schedule_config_card(schedule),
       schedule_components.render_upcoming_runs_card(schedule, upcoming),
@@ -84,8 +108,36 @@ def _build_schedule_detail_view(pathname: str | None) -> tuple[Any, ...]:
     output=[
         (Ids.TITLE, CP.CHILDREN),
         (Ids.BREADCRUMBS, CP.CHILDREN),
-        (Ids.STATUS_CONTAINER, CP.CHILDREN),
         (Ids.ACTIONS, CP.CHILDREN),
+    ],
+    inputs=[
+        ("url", CP.PATHNAME),
+        (ScheduleIds.UPDATE_SIGNAL, CP.DATA),
+    ],
+)
+def render_schedule_detail_header(pathname: str | None, unused_signal: Any):
+  """Renders the title, breadcrumbs, and header actions.
+
+  These redraw on load and after a user action, never on the poll. Redrawing
+  them on every tick replaced the Run Now button while its click was in flight.
+  Sharing one callback with the poll was no better: Dash keeps only the newest
+  response per callback, so a tick that landed during an action's redraw
+  dropped it and left the Pause/Resume button showing the old label.
+
+  Args:
+    pathname: The page path, which carries the schedule id.
+    unused_signal: The update signal written after a schedule action.
+
+  Returns:
+    New children for the title, breadcrumbs, and actions, or no_update.
+  """
+  del unused_signal
+  return _build_schedule_detail_header(pathname)
+
+
+@typed_callback(
+    output=[
+        (Ids.STATUS_CONTAINER, CP.CHILDREN),
         (Ids.STATS, CP.CHILDREN),
         (Ids.CONFIG_CONTAINER, CP.CHILDREN),
         (Ids.UPCOMING_CONTAINER, CP.CHILDREN),
@@ -102,12 +154,7 @@ def render_schedule_detail(
     unused_intervals: int | None,
     unused_signal: Any,
 ):
-  """Renders the Schedule Detail page on load, poll, and after any action.
-
-  The poll leaves the title, breadcrumbs, and header actions alone. Those only
-  change through a user action, which fires the update signal. Redrawing the
-  actions on every tick replaced the Run Now button while its click was in
-  flight, and Dash dropped that response, toast and all.
+  """Renders the Schedule Detail body on load, poll, and after any action.
 
   Args:
     pathname: The page path, which carries the schedule id.
@@ -115,12 +162,7 @@ def render_schedule_detail(
     unused_signal: The update signal written after a schedule action.
 
   Returns:
-    New children for every container, or no_update for each.
+    New children for every body container, or no_update for each.
   """
   del unused_intervals, unused_signal
-  view = _build_schedule_detail_view(pathname)
-  if dash.ctx.triggered_id != Ids.POLL_INTERVAL:
-    return view
-  title, breadcrumbs, status, _, *rest = view
-  del title, breadcrumbs
-  return (dash.no_update, dash.no_update, status, dash.no_update, *rest)
+  return _build_schedule_detail_body(pathname)

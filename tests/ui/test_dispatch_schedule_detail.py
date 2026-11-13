@@ -40,9 +40,20 @@ def _detail_dep(deps):
   )
 
 
-def _render(dash_client, deps, pathname: str):
-  response = dash_http.fire_url(dash_client, _detail_dep(deps), pathname, "")
-  return response
+def _header_dep(deps):
+  return dash_http.find(
+      deps, f"{ScheduleDetailIds.ACTIONS}.children", triggered_by="url"
+  )
+
+
+def _render(dash_client, deps, pathname: str) -> dict:
+  """Fires both page callbacks for `pathname` and merges what they wrote."""
+  written = {}
+  for dep in (_header_dep(deps), _detail_dep(deps)):
+    response = dash_http.fire_url(dash_client, dep, pathname, "")
+    assert response.status_code in (200, 204), response.status_code
+    written.update(dash_http.body(response).get("response", {}))
+  return written
 
 
 def test_detail_page_renders_active_schedule_with_runs_and_actions(
@@ -57,9 +68,7 @@ def test_detail_page_renders_active_schedule_with_runs_and_actions(
   db_session.commit()
 
   deps = dash_http.dependencies(dash_client)
-  resp = _render(dash_client, deps, f"/schedules/view/{sched.id}")
-  assert resp.status_code == 200
-  body = dash_http.body(resp)["response"]
+  body = _render(dash_client, deps, f"/schedules/view/{sched.id}")
   dumped = json.dumps(body)
 
   assert body[ScheduleDetailIds.TITLE]["children"] == "Detail Daily"
@@ -116,9 +125,7 @@ def test_detail_page_paused_archived_and_failed_dispatch_states(
   db_session.commit()
 
   deps = dash_http.dependencies(dash_client)
-  paused = dash_http.body(
-      _render(dash_client, deps, f"/schedules/view/{sched.id}")
-  )["response"]
+  paused = _render(dash_client, deps, f"/schedules/view/{sched.id}")
   assert "Paused" in json.dumps(paused[ScheduleDetailIds.STATUS_CONTAINER])
   assert "Last Dispatch Failed" in json.dumps(
       paused[ScheduleDetailIds.STATUS_CONTAINER]
@@ -134,9 +141,7 @@ def test_detail_page_paused_archived_and_failed_dispatch_states(
 
   row.is_archived = True
   db_session.commit()
-  archived = dash_http.body(
-      _render(dash_client, deps, f"/schedules/view/{sched.id}")
-  )["response"]
+  archived = _render(dash_client, deps, f"/schedules/view/{sched.id}")
   actions = json.dumps(archived[ScheduleDetailIds.ACTIONS])
   assert ScheduleIds.BTN_RESTORE_ROW in actions
   assert ScheduleIds.BTN_RUN_NOW not in actions
@@ -154,35 +159,28 @@ def test_detail_page_not_found_and_foreign_paths(
   del db_session, seeded
   deps = dash_http.dependencies(dash_client)
 
-  missing = dash_http.body(
-      _render(dash_client, deps, "/schedules/view/424242")
-  )["response"]
+  missing = _render(dash_client, deps, "/schedules/view/424242")
   assert missing[ScheduleDetailIds.TITLE]["children"] == "Schedule not found"
   assert "Schedule 424242 was not found." in json.dumps(
       missing[ScheduleDetailIds.CONFIG_CONTAINER]
   )
 
-  non_numeric = dash_http.body(
-      _render(dash_client, deps, "/schedules/view/none")
-  )["response"]
+  non_numeric = _render(dash_client, deps, "/schedules/view/none")
   assert "Schedule none was not found." in json.dumps(
       non_numeric[ScheduleDetailIds.CONFIG_CONTAINER]
   )
 
   for foreign_path in ("/schedules", "/agents"):
     foreign = _render(dash_client, deps, foreign_path)
-    assert foreign.status_code in (200, 204)
-    assert ScheduleDetailIds.TITLE not in dash_http.body(foreign).get(
-        "response", {}
-    )
+    assert ScheduleDetailIds.TITLE not in foreign
+    assert ScheduleDetailIds.STATS not in foreign
 
-  # The update signal redraws the page in place.
+  # The update signal redraws the header in place.
   refresh = dash_http.fire(
       dash_client,
-      _detail_dep(deps),
+      _header_dep(deps),
       {
           "url.pathname": "/schedules/view/424242",
-          f"{ScheduleDetailIds.POLL_INTERVAL}.n_intervals": 3,
           f"{ScheduleIds.UPDATE_SIGNAL}.data": {"ts": 1},
       },
       changed=[f"{ScheduleIds.UPDATE_SIGNAL}.data"],
@@ -195,7 +193,7 @@ def test_detail_page_not_found_and_foreign_paths(
 def test_poll_refreshes_data_but_not_the_header_actions(
     dash_client, callback_errors, db_session, seeded
 ):
-  """A poll tick must not replace the Run Now button mid-click."""
+  """A poll tick redraws the body and leaves the header buttons alone."""
   sched = _seed_schedule(
       db_session, seeded.agent_id, seeded.suite_id, name="Polled Schedule"
   )
@@ -224,6 +222,59 @@ def test_poll_refreshes_data_but_not_the_header_actions(
       ScheduleDetailIds.RUNS_CONTAINER,
   ):
     assert refreshed in written
+  callback_errors.assert_none()
+
+
+def test_header_is_not_drawn_by_any_callback_the_poll_feeds(dash_client):
+  """The poll must not share a callback with the header buttons.
+
+  Dash keeps only the newest response per callback. When the poll shared one
+  with the header, a tick that landed while a Pause click's redraw was in
+  flight dropped that redraw, and the button kept saying "Pause" on a paused
+  schedule. Clicking it again then resumed the schedule.
+  """
+  header = {
+      f"{ScheduleDetailIds.TITLE}.children",
+      f"{ScheduleDetailIds.BREADCRUMBS}.children",
+      f"{ScheduleDetailIds.ACTIONS}.children",
+  }
+  for dep in dash_http.dependencies(dash_client):
+    inputs = {dash_http.address(i) for i in dep["inputs"]}
+    if f"{ScheduleDetailIds.POLL_INTERVAL}.n_intervals" not in inputs:
+      continue
+    outputs = dash_http.outputs_grouping(dep["output"])
+    if not isinstance(outputs, list):
+      outputs = [outputs]
+    written = {dash_http.address(o) for o in outputs}
+    assert not written & header, dep["output"]
+
+
+def test_toggle_redraws_the_button_label_from_server_state(
+    dash_client, callback_errors, db_session, seeded
+):
+  """After Pause writes the update signal, the header offers Resume."""
+  sched = _seed_schedule(
+      db_session, seeded.agent_id, seeded.suite_id, name="Toggle Label"
+  )
+  db_session.get(EvalSchedule, sched.id).is_enabled = False
+  db_session.commit()
+
+  deps = dash_http.dependencies(dash_client)
+  redraw = dash_http.fire(
+      dash_client,
+      _header_dep(deps),
+      {
+          "url.pathname": f"/schedules/view/{sched.id}",
+          f"{ScheduleIds.UPDATE_SIGNAL}.data": {"ts": 2, "action": "toggle"},
+      },
+      changed=[f"{ScheduleIds.UPDATE_SIGNAL}.data"],
+  )
+  assert redraw.status_code == 200
+  actions = json.dumps(
+      dash_http.body(redraw)["response"][ScheduleDetailIds.ACTIONS]
+  )
+  assert "Resume" in actions
+  assert "Pause" not in actions
   callback_errors.assert_none()
 
 
@@ -287,3 +338,31 @@ def test_detail_layout_and_component_helpers():
       **base, last_run_id=9, last_run_status=RunStatus.COMPLETED
   )
   assert "#9" in repr(schedule_components.render_schedule_table([last_run]))
+
+
+def test_schedule_actions_disable_themselves_when_clicked(dash_client):
+  """A double click on a schedule action must send one request.
+
+  Two Run Now requests came back as one queued run and one refusal, and Dash
+  kept only the newer response, so the only toast was a red "Action Refused".
+  Each button now disables itself in the browser as soon as it is clicked.
+  """
+  deps = dash_http.dependencies(dash_client)
+  for button in (
+      ScheduleIds.BTN_RUN_NOW,
+      ScheduleIds.BTN_TOGGLE_PAUSE,
+      ScheduleIds.BTN_ARCHIVE_ROW,
+      ScheduleIds.BTN_RESTORE_ROW,
+  ):
+    pattern = json.dumps(
+        {"index": ["MATCH"], "type": button}, separators=(",", ":")
+    )
+    matches = [
+        dep
+        for dep in deps
+        if dep["output"] == f"{pattern}.disabled"
+        and [dash_http.address(i) for i in dep["inputs"]]
+        == [f"{pattern}.n_clicks"]
+    ]
+    assert len(matches) == 1, button
+    assert matches[0].get("clientside_function"), button

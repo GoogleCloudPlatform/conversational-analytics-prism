@@ -440,6 +440,12 @@ def test_row_actions_evaluations_schedule_filter_and_run_detail_badge(
         changed=[dash_http.pattern_address(run_now_in, sched.id)],
     )
     assert "Action Refused" in json.dumps(dash_http.body(refused_resp))
+    # The refusal still redraws the header, which re-enables the button the
+    # click disabled in the browser.
+    refused_signal = dash_http.body(refused_resp)["response"][
+        ScheduleIds.UPDATE_SIGNAL
+    ]["data"]
+    assert refused_signal["action"] == "refused"
 
     # Pause, Resume, Archive, and Restore over HTTP.
     for inp, expected_word in [
@@ -456,6 +462,25 @@ def test_row_actions_evaluations_schedule_filter_and_run_detail_badge(
       )
       assert act_resp.status_code == 200
       assert expected_word in json.dumps(dash_http.body(act_resp))
+
+  # An unexpected failure also redraws the header, so the button comes back.
+  failing_client = mock.MagicMock()
+  failing_client.schedules.trigger_schedule_now.side_effect = RuntimeError(
+      "context call failed"
+  )
+  with mock.patch.object(
+      schedules_callbacks, "get_client", return_value=failing_client
+  ):
+    failed_resp = dash_http.fire(
+        dash_client,
+        row_dep,
+        {dash_http.address(run_now_in): [(sched.id, 3)]},
+        changed=[dash_http.pattern_address(run_now_in, sched.id)],
+    )
+  failed = dash_http.body(failed_resp)["response"]
+  assert failed[ScheduleIds.UPDATE_SIGNAL]["data"]["action"] == "failed"
+  assert "Action Failed" in json.dumps(failed[NOTIFICATION_CONTAINER])
+  callback_errors.assert_logged("Schedule action schedules-btn-run-now failed")
 
   # Verify /evaluations?schedule_id=<id> renders filter banner and badge.
   eval_list_dep = dash_http.find(

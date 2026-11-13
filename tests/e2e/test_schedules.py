@@ -258,3 +258,151 @@ def test_deep_link_run_now_and_background_due_pickup_complete_end_to_end(
   refreshed_sched = db.get(EvalSchedule, due_sched_id)
   assert refreshed_sched.last_run_id == auto_run.id
   assert refreshed_sched.next_run_at > past
+
+
+def _open_detail(page: Page, base_url: str, schedule_id: int):
+  page.goto(f"{base_url}/schedules/view/{schedule_id}")
+  page.wait_for_load_state("networkidle")
+  return page.locator(f"#{ScheduleDetailIds.ACTIONS}")
+
+
+def test_pause_label_updates_even_when_a_poll_overtakes_the_redraw(
+    page: Page, base_url: str, seed, db
+):
+  """Hold the redraw a Pause click triggers until a poll has gone past it.
+
+  On the bugbash build, the poll and the header shared one callback. Dash
+  keeps only the newest response per callback, so a tick that landed during
+  the redraw dropped it and the button kept saying "Pause".
+  """
+  agent = seed.agent(name="Label Race Agent")
+  suite = seed.suite(name="Label Race Suite")
+  sched = EvalSchedule(
+      name="Label Race Schedule",
+      agent_id=agent.id,
+      test_suite_id=suite.id,
+      cadence="DAILY",
+      cron_expression="0 9 * * *",
+      timezone="UTC",
+      is_enabled=True,
+  )
+  db.add(sched)
+  db.commit()
+
+  actions = _open_detail(page, base_url, sched.id)
+  # Delay, inside the page, the one redraw request that the Pause click's
+  # update signal triggers for the header, past the next poll tick.
+  page.evaluate(
+      """([actionsOutput, signalId, delayMs]) => {
+        const realFetch = window.fetch;
+        window.__heldRedraws = 0;
+        window.fetch = function (url, options) {
+          if (String(url).includes("_dash-update-component")) {
+            const body = JSON.parse((options && options.body) || "{}");
+            const fromSignal = (body.changedPropIds || []).some(
+                (prop) => prop.startsWith(signalId + "."));
+            if (body.output.includes(actionsOutput) && fromSignal &&
+                window.__heldRedraws === 0) {
+              window.__heldRedraws += 1;
+              const args = arguments;
+              return new Promise((done) => setTimeout(done, delayMs)).then(
+                  () => realFetch.apply(this, args));
+            }
+          }
+          return realFetch.apply(this, arguments);
+        };
+      }""",
+      [
+          f"{ScheduleDetailIds.ACTIONS}.children",
+          ScheduleIds.UPDATE_SIGNAL,
+          7_000,
+      ],
+  )
+  actions.get_by_role("button", name="Pause", exact=True).click()
+
+  status = page.locator(f"#{ScheduleDetailIds.STATUS_CONTAINER}")
+  # The body redraws the badge while the header redraw waits.
+  expect(status).to_contain_text("Paused", timeout=15_000)
+  assert (
+      page.evaluate("window.__heldRedraws") == 1
+  ), "The Pause click never sent a header redraw."
+
+  expect(
+      actions.get_by_role("button", name="Resume", exact=True)
+  ).to_be_visible(timeout=15_000)
+  expect(actions.get_by_role("button", name="Pause", exact=True)).to_have_count(
+      0
+  )
+
+
+def test_double_clicking_run_now_queues_one_run_and_says_so(
+    page: Page, base_url: str, seed, db, cassettes
+):
+  """A double click must not end on a red refusal for a run that did start."""
+  agent = seed.agent(name="Double Click Agent")
+  suite = seed.suite(name="Double Click Suite")
+  seed.example(
+      suite,
+      question=traces.QUESTION,
+      assertions=[(AssertionType.TEXT_CONTAINS, {"value": "128"})],
+  )
+  cassettes.agent_context(agent)
+  cassettes.datasource_kind(agent)
+  cassettes.ask_question(agent, traces.QUESTION)
+  sched = EvalSchedule(
+      name="Double Click Schedule",
+      agent_id=agent.id,
+      test_suite_id=suite.id,
+      cadence="DAILY",
+      cron_expression="0 9 * * *",
+      timezone="UTC",
+      is_enabled=True,
+  )
+  db.add(sched)
+  db.commit()
+
+  actions = _open_detail(page, base_url, sched.id)
+  # Slow down, inside the page, the response to the first Run Now request, the
+  # way a slow agent context call did live. Without the click guard, the
+  # second click's refusal comes back first and Dash drops the success.
+  page.evaluate(
+      """([signalOutput, delayMs]) => {
+        const realFetch = window.fetch;
+        window.__slowedRunNow = 0;
+        window.fetch = function (url, options) {
+          const response = realFetch.apply(this, arguments);
+          if (String(url).includes("_dash-update-component")) {
+            const body = JSON.parse((options && options.body) || "{}");
+            if (body.output.includes(signalOutput) &&
+                window.__slowedRunNow === 0) {
+              window.__slowedRunNow += 1;
+              return response.then((r) => new Promise(
+                  (done) => setTimeout(() => done(r), delayMs)));
+            }
+          }
+          return response;
+        };
+      }""",
+      [f"{ScheduleIds.UPDATE_SIGNAL}.data", 1_500],
+  )
+  run_now = actions.get_by_role("button", name="Run Now", exact=True)
+  run_now.click()
+  page.wait_for_timeout(50)
+  # force: a real second click lands even if the button is now disabled.
+  run_now.click(force=True)
+
+  # Each toast is its own .mantine-Notifications-notification; the root
+  # exists once per screen position.
+  toast = page.locator(".mantine-Notifications-notification")
+  expect(toast.filter(has_text="Scheduled Run Queued")).to_have_count(
+      1, timeout=15_000
+  )
+  expect(toast.filter(has_text="Action Refused")).to_have_count(0)
+
+  db.expire_all()
+  runs = (
+      db.execute(sqlalchemy.select(Run).where(Run.schedule_id == sched.id))
+      .scalars()
+      .all()
+  )
+  assert len(runs) == 1

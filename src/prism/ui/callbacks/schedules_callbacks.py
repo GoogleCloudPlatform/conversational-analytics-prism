@@ -772,7 +772,17 @@ def handle_schedule_row_actions(
     if action_type == Ids.BTN_TOGGLE_PAUSE:
       current = client.schedules.get_schedule(schedule_id)
       if not current:
-        return dash.no_update, dash.no_update, dash.no_update
+        # Redraw the header anyway, to bring back the button the click
+        # disabled.
+        return (
+            {
+                "ts": time.time(),
+                "action": "missing",
+                "schedule_id": schedule_id,
+            },
+            dash.no_update,
+            dash.no_update,
+        )
       if current.is_enabled:
         updated = client.schedules.pause_schedule(schedule_id)
         title = "Schedule Paused"
@@ -817,8 +827,10 @@ def handle_schedule_row_actions(
           dash.no_update,
       )
   except ValueError as exc:
+    # The signal redraws the header, which brings back the button the click
+    # disabled.
     return (
-        dash.no_update,
+        {"ts": time.time(), "action": "refused", "schedule_id": schedule_id},
         [{
             "action": "show",
             "title": "Action Refused",
@@ -827,5 +839,47 @@ def handle_schedule_row_actions(
         }],
         dash.no_update,
     )
+  except Exception:  # pylint: disable=broad-except
+    # handle_errors would toast this too, but it writes no outputs, so the
+    # button the click disabled would stay disabled until a reload.
+    logger.exception(
+        "Schedule action %s failed for %s", action_type, schedule_id
+    )
+    return (
+        {"ts": time.time(), "action": "failed", "schedule_id": schedule_id},
+        [{
+            "action": "show",
+            "title": "Action Failed",
+            "message": "The action failed. Check the server log for details.",
+            "color": "red",
+        }],
+        dash.no_update,
+    )
 
   return dash.no_update, dash.no_update, dash.no_update
+
+
+# Disable a schedule action button in the browser as soon as it is clicked, so
+# a double click on it sends one request. A double click on Run Now used to
+# send two: the second was refused because the first had started a run, and
+# Dash keeps only the newest response, so the only toast was a red "Action
+# Refused". The header redraw that follows every action brings back fresh,
+# enabled buttons. Done client side because running= with ALL ids breaks the
+# Dash 4 renderer.
+for _button in (
+    Ids.BTN_RUN_NOW,
+    Ids.BTN_TOGGLE_PAUSE,
+    Ids.BTN_ARCHIVE_ROW,
+    Ids.BTN_RESTORE_ROW,
+):
+  dash.clientside_callback(
+      """
+      function(nClicks) {
+          return nClicks ? true : window.dash_clientside.no_update;
+      }
+      """,
+      dash.Output({"type": _button, "index": dash.MATCH}, CP.DISABLED),
+      dash.Input({"type": _button, "index": dash.MATCH}, CP.N_CLICKS),
+      prevent_initial_call=True,
+  )
+del _button
