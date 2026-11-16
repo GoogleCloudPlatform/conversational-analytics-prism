@@ -63,7 +63,7 @@ def _meta_item(
   )
 
 
-def layout(suite_id: str | None = None):
+def layout(suite_id: str | None = None, **_kwargs):
   # Whatever the path holds arrives here as a string, so the id has to be
   # checked and not only tested for presence. int() on a non-numeric one raised
   # straight out of the router and answered 500. Dash reaches this with "none",

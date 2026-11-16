@@ -24,7 +24,7 @@ from prism.ui.ids import ScheduleDetailIds as Ids
 from prism.ui.ids import ScheduleIds
 
 
-def layout(schedule_id: str = ""):  # pylint: disable=unused-argument
+def layout(schedule_id: str = "", **_kwargs):  # pylint: disable=unused-argument
   """Renders the Schedule Detail skeleton.
 
   The callbacks fill every container from the path, so a schedule edited,
