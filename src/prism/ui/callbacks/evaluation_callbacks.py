@@ -1605,6 +1605,57 @@ def _trial_error(message: str) -> list[Any]:
   return [dash.no_update] * 4 + [dmc.Alert(message, color="red")]
 
 
+def _render_trial_suggestions_content(trial, sug_loading: bool = False):
+  """Builds the body of the Suggested Assertions panel for a trial."""
+  if trial.status == RunStatus.FAILED:
+    return html.Div()
+
+  if sug_loading:
+    return assertion_components.render_suggestion_skeleton()
+
+  suggestion_cards = []
+  if trial.suggested_asserts:
+    for i, sa in enumerate(trial.suggested_asserts):
+      try:
+        item = sa.model_dump()
+        sug_id = item.get("id")
+        if sug_id is None:
+          # The card writes this into its buttons' index, and
+          # curate_trial_suggestion hands that index to curate_suggestion as
+          # a row id. The suite page draws the same card with a list
+          # position, so falling back to one here meant accepting the third
+          # suggestion curated whichever row holds id 2.
+          logger.error(
+              "Suggestion %d of %d has no id and cannot be curated",
+              i,
+              len(trial.suggested_asserts),
+          )
+          continue
+        card = assertion_components.render_suggested_assertion_card(
+            item, sug_id, ids_class=EvaluationIds
+        )
+        suggestion_cards.append(card)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        # Position and exception class only. The value being rendered is a
+        # suggested assertion's model_dump, whose params hold text the model
+        # lifted out of the agent's answer over the customer's data, and a
+        # pydantic ValidationError formats input_value={...} into its
+        # message. This log goes wherever the server's stdout goes.
+        logger.error(
+            "Failed to render suggestion card %d of %d: %s",
+            i,
+            len(trial.suggested_asserts),
+            type(e).__name__,
+        )
+
+  if suggestion_cards:
+    return dmc.SimpleGrid(cols=2, spacing="lg", children=suggestion_cards)
+
+  return assertion_components.render_empty_suggestions(
+      {"type": EvaluationIds.SUGGEST_BTN_TYPE, "index": "empty"}
+  )
+
+
 @typed_callback(
     [
         (EvaluationIds.TRIAL_BREADCRUMBS_CONTAINER, CP.CHILDREN),
@@ -1616,14 +1667,12 @@ def _trial_error(message: str) -> list[Any]:
     inputs=[
         ("url", CP.PATHNAME),
         ("url", CP.SEARCH),
-        (EvaluationIds.TRIAL_SUG_UPDATE_SIGNAL, CP.DATA),
     ],
     state=[(EvaluationIds.TRIAL_SUG_LOADING_STORE, CP.DATA)],
 )
 def render_trial_detail(
     pathname: str,
     search: str,
-    unused_update_signal: Any = None,
     sug_loading: bool = False,
 ):
   """Renders the Trial Detail page."""
@@ -1989,58 +2038,12 @@ def render_trial_detail(
         mb="md",
     )
 
-  accordion_style = {}
-  if trial.status == RunStatus.FAILED:
-    accordion_style = {"display": "none"}
-    suggestions_content_div = html.Div()
-  else:
-    suggestion_cards = []
-    if trial.suggested_asserts:
-      for i, sa in enumerate(trial.suggested_asserts):
-        try:
-          item = sa.model_dump()
-          sug_id = item.get("id")
-          if sug_id is None:
-            # The card writes this into its buttons' index, and
-            # curate_trial_suggestion hands that index to curate_suggestion as
-            # a row id. The suite page draws the same card with a list
-            # position, so falling back to one here meant accepting the third
-            # suggestion curated whichever row holds id 2.
-            logger.error(
-                "Suggestion %d of %d has no id and cannot be curated",
-                i,
-                len(trial.suggested_asserts),
-            )
-            continue
-          card = assertion_components.render_suggested_assertion_card(
-              item, sug_id, ids_class=EvaluationIds
-          )
-          suggestion_cards.append(card)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          # Position and exception class only. The value being rendered is a
-          # suggested assertion's model_dump, whose params hold text the model
-          # lifted out of the agent's answer over the customer's data, and a
-          # pydantic ValidationError formats input_value={...} into its
-          # message. This log goes wherever the server's stdout goes.
-          logger.error(
-              "Failed to render suggestion card %d of %d: %s",
-              i,
-              len(trial.suggested_asserts),
-              type(e).__name__,
-          )
-
-    if sug_loading:
-      suggestions_content_div = (
-          assertion_components.render_suggestion_skeleton()
-      )
-    elif suggestion_cards:
-      suggestions_content_div = dmc.SimpleGrid(
-          cols=2, spacing="lg", children=suggestion_cards
-      )
-    else:
-      suggestions_content_div = assertion_components.render_empty_suggestions(
-          {"type": EvaluationIds.SUGGEST_BTN_TYPE, "index": "empty"}
-      )
+  accordion_style = (
+      {"display": "none"} if trial.status == RunStatus.FAILED else {}
+  )
+  suggestions_content_div = _render_trial_suggestions_content(
+      trial, sug_loading=sug_loading
+  )
   suggestions_accordion = dmc.Accordion(
       id=EvaluationIds.TRIAL_SUG_ACCORDION,
       mb="lg",
@@ -2229,6 +2232,48 @@ def sync_assertion_filter_to_url(cat_val, type_val, stat_val, current_search):
   params["assertion_type"] = [new_type]
   params["assertion_status"] = [new_stat]
   return "?" + urllib.parse.urlencode(params, doseq=True)
+
+
+@typed_callback(
+    (EvaluationIds.TRIAL_SUGGESTIONS_CONTENT, CP.CHILDREN),
+    inputs=[(EvaluationIds.TRIAL_SUG_UPDATE_SIGNAL, CP.DATA)],
+    state=[
+        ("url", CP.PATHNAME),
+        (EvaluationIds.TRIAL_SUG_LOADING_STORE, CP.DATA),
+    ],
+    prevent_initial_call=True,
+)
+def render_trial_suggestions(
+    unused_update_signal: Any,
+    pathname: str,
+    sug_loading: bool = False,
+):
+  """Refreshes the Suggested Assertions panel in place."""
+  if not pathname or not pathname.startswith("/evaluations/trials/"):
+    return dash.no_update
+
+  try:
+    trial_id = id_from_pathname(pathname)
+  except (ValueError, IndexError):
+    return dash.no_update
+
+  if sug_loading:
+    return assertion_components.render_suggestion_skeleton()
+
+  try:
+    trial = get_client().runs.get_trial(trial_id)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logger.error("Failed to load suggestions for trial %s: %s", trial_id, e)
+    return dmc.Alert(
+        "Could not load suggested assertions. The details are in the server"
+        " log.",
+        color="red",
+    )
+
+  if not trial:
+    return html.Div()
+
+  return _render_trial_suggestions_content(trial, sug_loading=False)
 
 
 @typed_callback(
@@ -2445,8 +2490,8 @@ def poll_suggestion_results(
   except Exception as e:  # pylint: disable=broad-exception-caught
     logger.error("Polling failed for trial %s: %s", trial_id, e)
     # Stop polling on error to avoid infinite loop of crashes. The signal
-    # still goes out. It is the only Input render_trial_detail has here, and
-    # the loading store it reads alongside is State, so leaving the signal
+    # still goes out. It is the only Input render_trial_suggestions has here,
+    # and the loading store it reads alongside is State, so leaving the signal
     # alone cleared the flag without re-rendering and the skeleton stayed on
     # screen with the interval now disabled.
     return time.time(), [False] * len(btn_ids), False, True

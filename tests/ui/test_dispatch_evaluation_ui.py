@@ -271,7 +271,6 @@ def test_a_suggestion_without_an_id_is_dropped_not_renumbered(
       {
           "url.pathname": f"/evaluations/trials/{trial.id}",
           "url.search": "",
-          f"{EvaluationIds.TRIAL_SUG_UPDATE_SIGNAL}.data": 0,
           f"{EvaluationIds.TRIAL_SUG_LOADING_STORE}.data": False,
       },
   )
