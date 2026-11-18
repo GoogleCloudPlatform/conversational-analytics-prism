@@ -562,6 +562,14 @@ def get_assertion_style(a_type: str) -> dict[str, Any]:
   return style
 
 
+def get_assertion_label(a_type: str) -> str:
+  """Returns the display label for an assertion type."""
+  label = get_assertion_style(a_type)["label"]
+  if label == "Assertion" and a_type:
+    return a_type.replace("-", " ").title()
+  return label
+
+
 def _render_assertion_content(a_type: str, assertion: dict[str, Any]):
   """Renders the content block for the assertion card."""
   if a_type in ["duration-max-ms", "latency-max-ms"]:
