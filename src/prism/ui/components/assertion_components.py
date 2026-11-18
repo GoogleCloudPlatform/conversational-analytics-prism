@@ -331,6 +331,8 @@ def render_assertion_form_content():
                       placeholder="Select Assertion Type",
                       searchable=True,
                       allowDeselect=False,
+                      maxDropdownHeight=400,
+                      comboboxProps={"withinPortal": True},
                       leftSection=DashIconify(icon="bi:search"),
                   ),
               ],
