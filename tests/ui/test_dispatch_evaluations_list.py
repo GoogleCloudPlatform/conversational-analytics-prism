@@ -31,6 +31,7 @@ import json
 import re
 from typing import Any
 from unittest import mock
+import urllib.parse
 from prism.common.schemas.agent import AgentConfig
 from prism.common.schemas.execution import RunSchema
 from prism.common.schemas.execution import RunStatus
@@ -1125,12 +1126,156 @@ def test_malformed_and_unicode_digit_query_params_fall_back_safely(
   """Unicode digits like U+00B2 and negative/bogus params do not crash."""
   for bad_search in (
       "?page=\u00b2&agent_id=\u00b2&suite_id=\u00b2&schedule_id=\u00b2",
-      "?page=-3&sort=bogus&dir=sideways&status=NOT_A_STATUS",
+      "?page=-3&sort=bogus&dir=sideways&status=NOT_A_STATUS&page_size=999",
       (
           "?page=99999999999999&agent_id=99999999999999"
           "&suite_id=99999999999999&schedule_id=99999999999999"
+          "&page_size=\u00b2"
       ),
   ):
     rows = _list_runs(dash_client, bad_search)
     callback_errors.assert_none(f"on {bad_search}")
     assert seeded.run_id in rows
+
+
+def test_page_size_query_param_and_selector_update_url(
+    dash_client, callback_errors, monkeypatch
+):
+  """?page_size= controls limit/offset/total_pages and selector rewrites URL."""
+  deps = dash_http.dependencies(dash_client)
+  list_dep = dash_http.find(
+      deps, f"{EvaluationIds.RUN_LIST_CONTAINER}.children"
+  )
+  page_dep = next(
+      d
+      for d in deps
+      if any(
+          EvaluationIds.BTN_PAGE_NAV in dash_http.address(i)
+          for i in d["inputs"]
+      )
+  )
+  page_pattern = page_dep["inputs"][0]
+  size_dep = next(
+      d
+      for d in deps
+      if any(
+          EvaluationIds.SELECT_PAGE_SIZE in dash_http.address(i)
+          for i in d["inputs"]
+      )
+  )
+  size_pattern = size_dep["inputs"][0]
+
+  client = mock.Mock()
+  client.runs.count_runs.return_value = 30
+  client.runs.list_runs.return_value = [
+      _run_schema(i, RunStatus.COMPLETED, 1.0) for i in range(1, 11)
+  ]
+  monkeypatch.setattr(evaluation_callbacks, "get_client", lambda: client)
+
+  # ?page_size=10&page=2 queries limit=10, offset=10 and renders Page 2 of 3.
+  container = dash_http.body(
+      dash_http.fire_url(
+          dash_client, list_dep, "/evaluations", "?page_size=10&page=2"
+      )
+  )["response"][EvaluationIds.RUN_LIST_CONTAINER]["children"]
+  callback_errors.assert_none()
+  assert client.runs.list_runs.call_args.kwargs["limit"] == 10
+  assert client.runs.list_runs.call_args.kwargs["offset"] == 10
+  assert (
+      _find_by_id(container, EvaluationIds.PAGINATION_SUMMARY)["props"][
+          "children"
+      ]
+      == "Showing 11–20 of 30 runs"
+  )
+  assert (
+      _find_by_id(container, EvaluationIds.PAGINATION_INDICATOR)["props"][
+          "children"
+      ]
+      == "Page 2 of 3"
+  )
+  assert (
+      _find_by_id(
+          container,
+          {"type": EvaluationIds.SELECT_PAGE_SIZE, "index": "footer"},
+      )["props"]["value"]
+      == "10"
+  )
+
+  # Next from ?page_size=10&page=2 advances to page=3 (uses page_size=10, not 25).
+  nav_resp = dash_http.fire(
+      dash_client,
+      page_dep,
+      {
+          dash_http.address(page_pattern): [("prev", None), ("next", 1)],
+          "url.search": "?page_size=10&page=2",
+      },
+      changed=[
+          json.dumps(
+              {"index": "next", "type": EvaluationIds.BTN_PAGE_NAV},
+              separators=(",", ":"),
+          )
+          + ".n_clicks"
+      ],
+  )
+  callback_errors.assert_none()
+  nav_qs = urllib.parse.parse_qs(
+      dash_http.body(nav_resp)["response"]["url"]["search"].lstrip("?")
+  )
+  assert nav_qs == {"page_size": ["10"], "page": ["3"]}
+
+  # Changing selector to 10 preserves filters/sort and resets page.
+  changed_key = (
+      json.dumps(
+          {"index": "footer", "type": EvaluationIds.SELECT_PAGE_SIZE},
+          separators=(",", ":"),
+      )
+      + ".value"
+  )
+  resp = dash_http.fire(
+      dash_client,
+      size_dep,
+      {
+          dash_http.address(size_pattern): [("footer", "10")],
+          "url.search": "?agent_id=7&sort=agent&dir=asc&page=2",
+      },
+      changed=[changed_key],
+  )
+  callback_errors.assert_none()
+  qs = urllib.parse.parse_qs(
+      dash_http.body(resp)["response"]["url"]["search"].lstrip("?")
+  )
+  assert qs == {
+      "agent_id": ["7"],
+      "sort": ["agent"],
+      "dir": ["asc"],
+      "page_size": ["10"],
+  }
+
+  # Changing selector back to default 25 omits page_size and resets page.
+  resp_default = dash_http.fire(
+      dash_client,
+      size_dep,
+      {
+          dash_http.address(size_pattern): [("footer", "25")],
+          "url.search": "?page_size=10&page=2&sort=agent&dir=asc",
+      },
+      changed=[changed_key],
+  )
+  callback_errors.assert_none()
+  qs_default = urllib.parse.parse_qs(
+      dash_http.body(resp_default)["response"]["url"]["search"].lstrip("?")
+  )
+  assert qs_default == {"sort": ["agent"], "dir": ["asc"]}
+
+  # No-op when value already matches current URL page_size.
+  resp_noop = dash_http.fire(
+      dash_client,
+      size_dep,
+      {
+          dash_http.address(size_pattern): [("footer", "10")],
+          "url.search": "?page_size=10&page=2",
+      },
+      changed=[changed_key],
+  )
+  callback_errors.assert_none()
+  assert dash_http.body(resp_noop)["response"] == {}

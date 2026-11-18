@@ -602,7 +602,12 @@ def render_test_suite_table(
             ),
             # Coverage
             html.Td(
-                badges.render_coverage_badge(coverage_label, coverage_color),
+                dmc.Group(
+                    badges.render_coverage_badge(
+                        coverage_label, coverage_color
+                    ),
+                    justify="flex-end",
+                ),
                 style={"textAlign": "right", "padding": "16px 24px"},
             ),
             # Runs

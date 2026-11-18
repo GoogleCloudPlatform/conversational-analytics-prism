@@ -26,6 +26,7 @@ class EvaluationIds:
   FILTER_STATUS = "evaluations-filter-status"
   BTN_SORT_COLUMN = "evaluations-sort-column-btn"
   BTN_PAGE_NAV = "evaluations-page-nav-btn"
+  SELECT_PAGE_SIZE = "evaluations-page-size-select"
   PAGINATION_SUMMARY = "evaluations-pagination-summary"
   PAGINATION_INDICATOR = "evaluations-pagination-indicator"
 

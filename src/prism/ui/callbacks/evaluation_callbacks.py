@@ -53,6 +53,7 @@ from prism.ui.utils import typed_callback
 logger = logging.getLogger(__name__)
 
 _RUN_LIST_PAGE_SIZE = 25
+_RUN_LIST_PAGE_SIZE_OPTIONS = (10, 25, 50, 100)
 _MAX_PG_INT32 = 2_147_483_647
 
 
@@ -97,6 +98,13 @@ def _parse_eval_search(search: str | None) -> dict[str, Any]:
   page_int = _parse_optional_int(raw.get("page", [None])[0])
   page = page_int if page_int is not None and page_int >= 1 else 1
 
+  page_size_raw = _parse_optional_int(raw.get("page_size", [None])[0])
+  page_size = (
+      page_size_raw
+      if page_size_raw in _RUN_LIST_PAGE_SIZE_OPTIONS
+      else _RUN_LIST_PAGE_SIZE
+  )
+
   return {
       "agent_id": agent_id,
       "suite_id": suite_id,
@@ -106,6 +114,7 @@ def _parse_eval_search(search: str | None) -> dict[str, Any]:
       "sort_by": sort_by,
       "sort_dir": sort_dir,
       "page": page,
+      "page_size": page_size,
   }
 
 
@@ -115,10 +124,14 @@ def _build_eval_search(params: dict[str, list[str]]) -> str:
 
 
 def _render_pagination_footer(
-    page: int, total_pages: int, total_count: int, shown_count: int
+    page: int,
+    total_pages: int,
+    total_count: int,
+    shown_count: int,
+    page_size: int = _RUN_LIST_PAGE_SIZE,
 ) -> dmc.Group:
   """Renders the pagination footer attached to the bottom of the runs table."""
-  offset = (page - 1) * _RUN_LIST_PAGE_SIZE
+  offset = (page - 1) * page_size
   start_row = offset + 1
   end_row = offset + shown_count
   run_word = "run" if total_count == 1 else "runs"
@@ -132,11 +145,40 @@ def _render_pagination_footer(
           "backgroundColor": "var(--mantine-color-gray-0)",
       },
       children=[
-          dmc.Text(
-              f"Showing {start_row}–{end_row} of {total_count} {run_word}",
-              id=EvaluationIds.PAGINATION_SUMMARY,
-              size="sm",
-              c="dimmed",
+          dmc.Group(
+              gap="md",
+              align="center",
+              children=[
+                  dmc.Text(
+                      f"Showing {start_row}–{end_row} of {total_count}"
+                      f" {run_word}",
+                      id=EvaluationIds.PAGINATION_SUMMARY,
+                      size="sm",
+                      c="dimmed",
+                  ),
+                  dmc.Group(
+                      gap="xs",
+                      align="center",
+                      children=[
+                          dmc.Text("Rows per page", size="sm", c="dimmed"),
+                          dmc.Select(
+                              id={
+                                  "type": EvaluationIds.SELECT_PAGE_SIZE,
+                                  "index": "footer",
+                              },
+                              data=[
+                                  {"label": str(n), "value": str(n)}
+                                  for n in _RUN_LIST_PAGE_SIZE_OPTIONS
+                              ],
+                              value=str(page_size),
+                              allowDeselect=False,
+                              size="xs",
+                              w=76,
+                              **{"aria-label": "Rows per page"},
+                          ),
+                      ],
+                  ),
+              ],
           ),
           dmc.Group(
               gap="sm",
@@ -200,6 +242,7 @@ def render_run_list(pathname: str, search: str):
   include_archived = parsed["include_archived"]
   sort_by = parsed["sort_by"]
   sort_dir = parsed["sort_dir"]
+  page_size = parsed["page_size"]
 
   client = get_client()
   filter_kwargs: dict[str, Any] = {
@@ -212,13 +255,13 @@ def render_run_list(pathname: str, search: str):
     filter_kwargs["schedule_id"] = schedule_id
 
   total_count = client.runs.count_runs(**filter_kwargs)
-  total_pages = max(1, math.ceil(total_count / _RUN_LIST_PAGE_SIZE))
+  total_pages = max(1, math.ceil(total_count / page_size))
   page = min(parsed["page"], total_pages)
-  offset = (page - 1) * _RUN_LIST_PAGE_SIZE
+  offset = (page - 1) * page_size
 
   list_kwargs: dict[str, Any] = {
       **filter_kwargs,
-      "limit": _RUN_LIST_PAGE_SIZE,
+      "limit": page_size,
       "offset": offset,
   }
   if sort_by is not None:
@@ -297,6 +340,7 @@ def render_run_list(pathname: str, search: str):
       total_pages=total_pages,
       total_count=total_count,
       shown_count=len(runs),
+      page_size=page_size,
   )
   parts: list[Any] = []
   if filter_banner:
@@ -473,7 +517,7 @@ def update_eval_url_from_page(n_clicks_all, current_search: str):
   if parsed["schedule_id"] is not None:
     filter_kwargs["schedule_id"] = parsed["schedule_id"]
   total_count = client.runs.count_runs(**filter_kwargs)
-  total_pages = max(1, math.ceil(total_count / _RUN_LIST_PAGE_SIZE))
+  total_pages = max(1, math.ceil(total_count / parsed["page_size"]))
   current_page = min(parsed["page"], total_pages)
 
   if direction == "prev":
@@ -493,6 +537,43 @@ def update_eval_url_from_page(n_clicks_all, current_search: str):
     params.pop("page", None)
   else:
     params["page"] = [str(next_page)]
+  return _build_eval_search(params)
+
+
+@typed_callback(
+    dash.Output("url", "search", allow_duplicate=True),
+    inputs=[
+        dash.Input(
+            {"type": EvaluationIds.SELECT_PAGE_SIZE, "index": dash.ALL},
+            CP.VALUE,
+        ),
+    ],
+    state=[("url", CP.SEARCH)],
+    prevent_initial_call=True,
+)
+def update_eval_url_from_page_size(values_all, current_search: str):
+  """Updates the ?page_size= query param and resets to page 1."""
+  if not values_all:
+    return dash.no_update
+
+  next_size = _parse_optional_int(values_all[0])
+  if next_size not in _RUN_LIST_PAGE_SIZE_OPTIONS:
+    return dash.no_update
+
+  cur_size = _parse_eval_search(current_search)["page_size"]
+  if next_size == cur_size:
+    return dash.no_update
+
+  params = (
+      urllib.parse.parse_qs(current_search.lstrip("?"))
+      if current_search
+      else {}
+  )
+  if next_size == _RUN_LIST_PAGE_SIZE:
+    params.pop("page_size", None)
+  else:
+    params["page_size"] = [str(next_size)]
+  params.pop("page", None)
   return _build_eval_search(params)
 
 
