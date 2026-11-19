@@ -1,0 +1,101 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tests:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: prism_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13 and uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          uv python install 3.13
+          uv sync --locked --all-groups
+
+      - name: Create test databases
+        run: |
+          uv run --frozen python - <<'PY'
+          import sqlalchemy
+
+          admin = sqlalchemy.create_engine(
+              "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          with admin.connect() as conn:
+            for db_name in ("prism_test", "prism_e2e"):
+              exists = conn.execute(
+                  sqlalchemy.text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                  {"name": db_name},
+              ).scalar()
+              if not exists:
+                conn.execute(sqlalchemy.text(f'CREATE DATABASE "{db_name}"'))
+          admin.dispose()
+          PY
+
+      - name: Run unit, isolation, and repository tests
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/prism_test
+          # Keeps google.genai.Client from calling google.auth.default() at
+          # init when FastDepends builds GenAIClient without ADC.
+          PRISM_GENAI_CLIENT_PROJECT: test-project
+        run: ./scripts/run_tests.sh
+
+      - name: Install Playwright Chromium
+        run: uv run --frozen playwright install --with-deps chromium
+
+      - name: Run browser E2E tests
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/prism_test
+          E2E_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/prism_e2e
+        run: ./scripts/run_e2e.sh

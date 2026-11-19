@@ -16,6 +16,8 @@ limitations under the License.
 
 # Prism
 
+[![Tests](https://github.com/GoogleCloudPlatform/conversational-analytics-prism/actions/workflows/tests.yml/badge.svg)](https://github.com/GoogleCloudPlatform/conversational-analytics-prism/actions/workflows/tests.yml)
+
 **This is not an officially supported Google product. Eligibility for the
 [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security)
 is determined by the
